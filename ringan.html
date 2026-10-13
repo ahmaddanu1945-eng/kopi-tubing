@@ -605,6 +605,17 @@ function sbH(){
   return {'apikey': c.key, 'Authorization': 'Bearer ' + c.key, 'Content-Type': 'application/json'};
 }
 function sbUrl(t){ return sbCfg().url + '/rest/v1/' + t; }
+async function sbOutletId(nama){
+  var nm = nama || 'KT PAMIJAHAN';
+  var r = await fetch(sbUrl('outlets') + '?select=id&nama=eq.' + encodeURIComponent(nm), {headers: sbH()});
+  if (!r.ok) throw new Error('outlet HTTP ' + r.status);
+  var j = await r.json();
+  if (j && j.length) return j[0].id;
+  var r2 = await fetch(sbUrl('outlets'), {method: 'POST', headers: Object.assign(sbH(), {Prefer: 'return=representation'}), body: JSON.stringify({nama: nm})});
+  if (!r2.ok) throw new Error('outlet buat HTTP ' + r2.status);
+  var j2 = await r2.json();
+  return j2[0].id;
+}
 async function sbPush(){
   var c = sbCfg();
   if (!c) { document.getElementById('sbInfo').textContent = 'Hubungkan dulu.'; return; }
@@ -619,13 +630,22 @@ async function sbPush(){
       if (!r1.ok) throw new Error('bahan HTTP ' + r1.status + ' baris ' + (i + 1) + ': ' + (await r1.text()).slice(0, 150));
       done += part.length;
     }
-    var mRows = MENUS.map(function(m){ return {nama: m.nama, harga_jual: Math.round(m.jual), misc_pct: 10, dibuat_oleh: m.outlet || ''}; });
-    if (mRows.length) {
-      info.textContent = 'Push ' + mRows.length + ' menu...';
-      var r2 = await fetch(sbUrl('menus'), {method: 'POST', headers: sbH(), body: JSON.stringify(mRows)});
-      if (!r2.ok) throw new Error('menu HTTP ' + r2.status + ': ' + (await r2.text()).slice(0, 150));
+    var mN = 0;
+    for (var m = 0; m < MENUS.length; m++) {
+      var mu = MENUS[m];
+      info.textContent = 'Push menu ' + (m + 1) + '/' + MENUS.length + ': ' + mu.nama;
+      var oid = await sbOutletId(mu.outlet);
+      var rm = await fetch(sbUrl('menus'), {method: 'POST', headers: Object.assign(sbH(), {Prefer: 'return=representation'}), body: JSON.stringify({nama: mu.nama, outlet_id: oid, harga_jual: Math.round(mu.jual), misc_pct: 10, dibuat_oleh: mu.outlet || ''})});
+      if (!rm.ok) throw new Error('menu HTTP ' + rm.status + ': ' + (await rm.text()).slice(0, 150));
+      var mj = await rm.json(), mid = mj[0].id;
+      var items = (mu.resep || []).map(function(rr){ return {menu_id: mid, ingredient_id: null, nama_snapshot: rr.ing, prep_qty: rr.qty, harga_snapshot: Math.round(rr.price), isi_snapshot: rr.qi}; });
+      if (items.length) {
+        var ri = await fetch(sbUrl('menu_items'), {method: 'POST', headers: sbH(), body: JSON.stringify(items)});
+        if (!ri.ok) throw new Error('resep HTTP ' + ri.status + ': ' + (await ri.text()).slice(0, 150));
+      }
+      mN++;
     }
-    info.textContent = 'Push OK ' + new Date().toLocaleString('id-ID') + ': ' + done + ' bahan, ' + mRows.length + ' menu.';
+    info.textContent = 'Push OK ' + new Date().toLocaleString('id-ID') + ': ' + done + ' bahan, ' + mN + ' menu + resep.';
   } catch(e){ info.textContent = 'Push gagal: ' + e.message; }
 }
 async function sbPull(){
@@ -646,10 +666,29 @@ async function sbPull(){
       document.getElementById('dbN').textContent = '— ' + B.length + ' bahan';
       document.getElementById('kB').textContent = B.length;
     }
-    var r2 = await fetch(sbUrl('menus') + '?select=*&order=created_at.desc&limit=200', {headers: sbH()});
+    var r2 = await fetch(sbUrl('menus') + '?select=*,menu_items(*)&order=created_at.desc&limit=200', {headers: sbH()});
     if (r2.ok) {
       var mj = await r2.json();
-      info.textContent = 'Pull OK: ' + B.length + ' bahan, ' + mj.length + ' menu di cloud.';
+      var baru = 0;
+      for (var m = 0; m < mj.length; m++) {
+        var cm = mj[m];
+        var ada = false;
+        for (var k = 0; k < MENUS.length; k++) { if (MENUS[k].nama === cm.nama && MENUS[k].jual === cm.harga_jual) { ada = true; break; } }
+        if (!ada) {
+          var rr = (cm.menu_items || []).map(function(it){ return {ing: it.nama_snapshot, qty: parseFloat(it.prep_qty), price: it.harga_snapshot, qi: parseFloat(it.isi_snapshot)}; });
+          var act = 0;
+          for (var q = 0; q < rr.length; q++) act += (rr[q].price / rr[q].qi) * rr[q].qty;
+          act = Math.round(act);
+          var misc = Math.round(act * (parseFloat(cm.misc_pct) || 10) / 100);
+          var prod = act + misc;
+          var jl = cm.harga_jual || 1;
+          MENUS.push({id: Date.now() + m, outlet: cm.dibuat_oleh || 'KT PAMIJAHAN', nama: cm.nama, jual: cm.harga_jual, actual: act, misc: misc, miscPct: parseFloat(cm.misc_pct) || 10, prod: prod, pct: Math.round(prod / jl * 10000) / 100, resep: rr});
+          baru++;
+        }
+      }
+      try { localStorage.setItem('kt_menu', JSON.stringify(MENUS)); } catch(e){}
+      try { dash(); loadMenu(); } catch(e){}
+      info.textContent = 'Pull OK: ' + B.length + ' bahan, ' + mj.length + ' menu cloud, ' + baru + ' baru masuk.';
     } else info.textContent = 'Pull bahan OK (' + B.length + '). Menu: HTTP ' + r2.status;
   } catch(e){ info.textContent = 'Pull gagal: ' + e.message; }
 }
