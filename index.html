@@ -214,6 +214,7 @@ function enter(u){
   paintUser();
   applyRole();
   dash();
+  try { sbAuto(); } catch(e){}
 }
 function paintUser(){
   var c = curUser();
@@ -442,6 +443,7 @@ function saveMenu(){
   try { localStorage.removeItem('kt_draft'); } catch(e){}
   document.getElementById('mN').textContent = MENUS.length;
   dash();
+  try { if (sbCfg()) sbPushOne(MENUS[MENUS.length - 1]); } catch(e){}
   var a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(MENUS, null, 1)], {type: 'application/json'}));
   a.download = 'kopi-tubing-backup.json'; a.click();
@@ -595,8 +597,10 @@ function sbPaint(){
 function sbSave(){
   var u = document.getElementById('sbUrl').value.trim().replace(/\/$/, ''), k = document.getElementById('sbKey').value.trim();
   if (!u || !k) { document.getElementById('sbInfo').textContent = 'Isi URL + anon key.'; return; }
+  if (u.indexOf('http') !== 0) u = 'https://' + u;
   localStorage.setItem('kt_sb', JSON.stringify({url: u, key: k}));
   sbPaint();
+  sbAuto();
   sbPush();
 }
 function sbClear(){ localStorage.removeItem('kt_sb'); sbPaint(); document.getElementById('sbInfo').textContent = 'Terputus. Data lokal tetap ada.'; }
@@ -647,6 +651,52 @@ async function sbPush(){
     }
     info.textContent = 'Push OK ' + new Date().toLocaleString('id-ID') + ': ' + done + ' bahan, ' + mN + ' menu + resep.';
   } catch(e){ info.textContent = 'Push gagal: ' + e.message; }
+}
+async function sbPushOne(mu){
+  var oid = await sbOutletId(mu.outlet);
+  var rm = await fetch(sbUrl('menus'), {method: 'POST', headers: Object.assign(sbH(), {Prefer: 'return=representation'}), body: JSON.stringify({nama: mu.nama, outlet_id: oid, harga_jual: Math.round(mu.jual), misc_pct: 10, dibuat_oleh: mu.outlet || ''})});
+  if (!rm.ok) throw new Error('menu HTTP ' + rm.status);
+  var mj = await rm.json(), mid = mj[0].id;
+  mu.cloud_id = mid;
+  try { localStorage.setItem('kt_menu', JSON.stringify(MENUS)); } catch(e){}
+  var items = (mu.resep || []).map(function(rr){ return {menu_id: mid, ingredient_id: null, nama_snapshot: rr.ing, prep_qty: rr.qty, harga_snapshot: Math.round(rr.price), isi_snapshot: rr.qi}; });
+  if (items.length) {
+    var ri = await fetch(sbUrl('menu_items'), {method: 'POST', headers: sbH(), body: JSON.stringify(items)});
+    if (!ri.ok) throw new Error('resep HTTP ' + ri.status);
+  }
+  document.getElementById('sbInfo').textContent = 'Auto-push OK: ' + mu.nama + ' ' + new Date().toLocaleString('id-ID');
+}
+var sbTimer = null;
+function sbAuto(){
+  try { if (sbTimer) clearInterval(sbTimer); } catch(e){}
+  try { if (sbCfg()) sbPullQuiet(); } catch(e){}
+  sbTimer = setInterval(function(){ try { if (sbCfg()) sbPullQuiet(); } catch(e){} }, 60000);
+}
+async function sbPullQuiet(){
+  try {
+    var r2 = await fetch(sbUrl('menus') + '?select=*,menu_items(*)&order=created_at.desc&limit=200', {headers: sbH()});
+    if (!r2.ok) return;
+    var mj = await r2.json(), baru = 0;
+    for (var m = 0; m < mj.length; m++) {
+      var cm = mj[m], ada = false;
+      for (var k = 0; k < MENUS.length; k++) { if (MENUS[k].cloud_id === cm.id || (MENUS[k].nama === cm.nama && MENUS[k].jual === cm.harga_jual)) { ada = true; break; } }
+      if (!ada) {
+        var rr = (cm.menu_items || []).map(function(it){ return {ing: it.nama_snapshot, qty: parseFloat(it.prep_qty), price: it.harga_snapshot, qi: parseFloat(it.isi_snapshot)}; });
+        var act = 0;
+        for (var q = 0; q < rr.length; q++) act += (rr[q].price / rr[q].qi) * rr[q].qty;
+        act = Math.round(act);
+        var misc = Math.round(act * (parseFloat(cm.misc_pct) || 10) / 100);
+        var prod = act + misc, jl = cm.harga_jual || 1;
+        MENUS.push({id: Date.now() + m, cloud_id: cm.id, outlet: cm.dibuat_oleh || 'KT PAMIJAHAN', nama: cm.nama, jual: cm.harga_jual, actual: act, misc: misc, miscPct: parseFloat(cm.misc_pct) || 10, prod: prod, pct: Math.round(prod / jl * 10000) / 100, resep: rr});
+        baru++;
+      }
+    }
+    if (baru) {
+      try { localStorage.setItem('kt_menu', JSON.stringify(MENUS)); } catch(e){}
+      try { dash(); } catch(e){}
+      try { document.getElementById('sbInfo').textContent = 'Auto-pull: ' + baru + ' menu baru ' + new Date().toLocaleString('id-ID'); } catch(e){}
+    }
+  } catch(e){}
 }
 async function sbPull(){
   var c = sbCfg();
